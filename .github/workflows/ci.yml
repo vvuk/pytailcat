@@ -47,9 +47,12 @@ jobs:
         with:
           go-version-file: tailcat/go.mod
           cache-dependency-path: tailcat/go.sum
+      # Ubuntu's system Python 3.12.3 segfaults in the garbage collector
+      # (fixed in CPython 3.12.7), so always use a uv-managed interpreter.
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
+          python-preference: only-managed
           enable-cache: true
           cache-dependency-glob: pytailcat/uv.lock
 
