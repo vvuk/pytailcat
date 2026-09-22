@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  UV_PYTHON_PREFERENCE: only-managed
   TAILCAT_REPOSITORY: ${{ vars.TAILCAT_REPOSITORY || 'vvuk/tailcat' }}
   TAILCAT_REF: ${{ vars.TAILCAT_REF || 'vlad/c-api' }}
 
@@ -48,11 +49,10 @@ jobs:
           go-version-file: tailcat/go.mod
           cache-dependency-path: tailcat/go.sum
       # Ubuntu's system Python 3.12.3 segfaults in the garbage collector
-      # (fixed in CPython 3.12.7), so always use a uv-managed interpreter.
+      # (fixed in CPython 3.12.7), so UV_PYTHON_PREFERENCE forces a managed one.
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
-          python-preference: only-managed
           enable-cache: true
           cache-dependency-glob: pytailcat/uv.lock
 

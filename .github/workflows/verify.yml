@@ -16,6 +16,9 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_PYTHON_PREFERENCE: only-managed
+
 jobs:
   verify:
     strategy:
@@ -41,11 +44,10 @@ jobs:
           go-version-file: tailcat/go.mod
           cache-dependency-path: tailcat/go.sum
       # Ubuntu's system Python 3.12.3 segfaults in the garbage collector
-      # (fixed in CPython 3.12.7), so always use a uv-managed interpreter.
+      # (fixed in CPython 3.12.7), so UV_PYTHON_PREFERENCE forces a managed one.
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
-          python-preference: only-managed
       - run: uv sync --extra httpx --python ${{ matrix.python }}
       - run: uv run ruff check src tests scripts hatch_build.py
       - run: uv run ruff format --check src tests scripts hatch_build.py
