@@ -286,6 +286,11 @@ Linux build produces a `linux_*` wheel. macOS builds conservatively target the
 build host's OS version. Windows builds require a cgo-compatible C compiler.
 No package or release is published by the build commands above.
 
+The GitHub Actions CI workflow runs the commands above, plus the Go race tests,
+on Linux for every push and pull request. It checks out Tailcat from the
+`TAILCAT_REPOSITORY` and `TAILCAT_REF` repository variables, defaulting to the fork
+branch that carries the C API until it lands upstream.
+
 The manual GitHub Actions verification workflow tests Python 3.12–3.14 on Linux,
 macOS, and Windows and uploads build artifacts. It takes a Tailcat repository and
 commit containing the C API, so it can test paired changes before an upstream

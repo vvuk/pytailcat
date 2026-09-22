@@ -1,0 +1,73 @@
+name: CI
+
+# Runs the "Builds and verification" steps from README.md on every push and
+# pull request. The Go C API is not yet in an upstream Tailcat release, so the
+# sibling checkout comes from a repository and ref that default to the fork
+# branch carrying the C API. Override them with the TAILCAT_REPOSITORY and
+# TAILCAT_REF repository variables (Settings > Secrets and variables > Actions).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TAILCAT_REPOSITORY: ${{ vars.TAILCAT_REPOSITORY || 'vvuk/tailcat' }}
+  TAILCAT_REF: ${{ vars.TAILCAT_REF || 'vlad/c-api' }}
+
+jobs:
+  verify:
+    name: Verify (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12']
+    defaults:
+      run:
+        working-directory: pytailcat
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pytailcat
+      - name: Check out Tailcat with the C API
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAILCAT_REPOSITORY }}
+          ref: ${{ env.TAILCAT_REF }}
+          path: tailcat
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tailcat/go.mod
+          cache-dependency-path: tailcat/go.sum
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: pytailcat/uv.lock
+
+      # Steps below follow README.md, "Builds and verification".
+      - run: uv sync --python ${{ matrix.python }} --extra httpx
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest
+      - run: uv build
+      - run: uv run python scripts/check_wheel.py --python ${{ matrix.python }} --integration
+      - name: Go C API tests with the race detector
+        run: go test -race ./internal/capi
+        working-directory: tailcat
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytailcat-dist-py${{ matrix.python }}
+          path: pytailcat/dist/*
+          if-no-files-found: ignore
