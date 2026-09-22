@@ -64,6 +64,14 @@ class CustomBuildHook(BuildHookInterface):
             platform.system(), "libtailcat.so"
         )
         env = {**os.environ, "CGO_ENABLED": "1"}
+        target = os.environ.get("MACOSX_DEPLOYMENT_TARGET")
+        if platform.system() == "Darwin" and target:
+            # Go's build cache keys on CGO_CFLAGS/CGO_LDFLAGS but not on
+            # MACOSX_DEPLOYMENT_TARGET, so pass the target explicitly. Otherwise a
+            # cached library built for another deployment target is reused.
+            flag = f"-mmacosx-version-min={target}"
+            for name in ("CGO_CFLAGS", "CGO_LDFLAGS"):
+                env[name] = f"{flag} {env.get(name, '')}".strip()
         tags = (source / "build-tags.txt").read_text().strip()
         subprocess.run(
             [
@@ -89,9 +97,10 @@ class CustomBuildHook(BuildHookInterface):
         )
         build_data["pure_python"] = False
         tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
-        # Use the running macOS version as a conservative deployment floor.
+        # Honor MACOSX_DEPLOYMENT_TARGET (which clang/cgo also read); otherwise
+        # use the running macOS version as a conservative deployment floor.
         if platform.system() == "Darwin":
-            release = platform.mac_ver()[0].split(".")
+            release = (target or platform.mac_ver()[0]).split(".")
             minor = "0" if int(release[0]) >= 11 else release[1]
             tag = f"macosx_{release[0]}_{minor}_{platform.machine()}"
         build_data["tag"] = f"py3-none-{tag}"

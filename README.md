@@ -280,19 +280,47 @@ under `native/tailcat/` and should not be edited; canonical Go changes belong in
 `tailcat/`. Wheel builds include an SHA-256 fingerprint of their source inputs and
 the Tailcat license. `build_info()` reports the native ABI and Go build metadata.
 
-Wheels are platform-specific but independent of the CPython extension ABI. Linux
-release wheels need an appropriate manylinux build/repair environment; a local
-Linux build produces a `linux_*` wheel. macOS builds conservatively target the
-build host's OS version. Windows builds require a cgo-compatible C compiler.
-No package or release is published by the build commands above.
+Wheels are platform-specific but independent of the CPython extension ABI. A local
+Linux build produces a `linux_*` wheel; release wheels are built in manylinux
+containers and repaired with `auditwheel`. macOS builds target
+`MACOSX_DEPLOYMENT_TARGET` when set (release wheels use 12.0, the current Go
+toolchain's minimum) and otherwise the build host's OS version. Windows builds
+require a cgo-compatible C compiler. No package or release is published by the
+build commands above.
 
-The GitHub Actions CI workflow runs the commands above, plus the Go race tests,
-on Linux for every push and pull request. It checks out Tailcat from the
-`TAILCAT_REPOSITORY` and `TAILCAT_REF` repository variables, defaulting to the fork
-branch that carries the C API until it lands upstream.
+## Continuous integration and releases
 
-The manual GitHub Actions verification workflow tests Python 3.12–3.14 on Linux,
+All workflows check out Tailcat from the `TAILCAT_REPOSITORY` and `TAILCAT_REF`
+repository variables, defaulting to the fork branch that carries the C API until
+it lands upstream.
+
+- **CI** (`ci.yml`): runs the commands above plus the Go race tests on Linux
+  x86_64, Linux arm64, and macOS arm64 for every push to `main` and every pull
+  request. It also runs the release wheel build so a broken release is caught
+  early.
+- **Build wheels** (`wheels.yml`): reusable workflow producing the sdist and one
+  wheel per platform (`manylinux_2_28_x86_64`, `manylinux_2_28_aarch64`,
+  `macosx_12_0_arm64`), each bundling that platform's `libtailcat`. Every wheel is
+  then installed and smoke-tested on a plain runner without Go.
+- **Release** (`release.yml`): pushing a tag `vX.Y.Z` that matches the version in
+  `pyproject.toml` builds all distributions and creates a GitHub release with them
+  attached and generated notes. Versions with `a`, `b`, `rc`, or `dev` segments are
+  marked pre-releases.
+- **Publish** (`publish.yml`): when a release is published (or manually for a
+  tag), downloads its assets and uploads them to AWS CodeArtifact with
+  `uv publish`, authenticating through GitHub OIDC. It needs the `AWS_REGION`,
+  `AWS_ROLE_ARN`, `CODEARTIFACT_DOMAIN`, `CODEARTIFACT_DOMAIN_OWNER`, and
+  `CODEARTIFACT_REPOSITORY` repository variables and a `codeartifact` environment.
+
+To cut a release:
+
+```sh
+uv version X.Y.Z          # updates pyproject.toml and uv.lock
+git commit -am "Release X.Y.Z"
+git tag vX.Y.Z && git push origin main vX.Y.Z
+```
+
+The manual verification workflow (`verify.yml`) tests Python 3.12–3.14 on Linux,
 macOS, and Windows and uploads build artifacts. It takes a Tailcat repository and
 commit containing the C API, so it can test paired changes before an upstream
-release. That workflow must be run on those platforms before claiming a verified
-cross-platform release.
+release.

@@ -1,0 +1,80 @@
+name: Publish to CodeArtifact
+
+# Uploads the distributions attached to a GitHub release to an AWS
+# CodeArtifact PyPI repository. Runs automatically when release.yml publishes a
+# release, or manually for an existing release tag.
+#
+# Authentication uses GitHub OIDC; no long-lived AWS keys are stored. Configure
+# these repository variables (Settings > Secrets and variables > Actions):
+#
+#   AWS_REGION                 e.g. us-east-1
+#   AWS_ROLE_ARN               IAM role trusting this repository's OIDC subject
+#                              (repo:vvuk/pytailcat:environment:codeartifact)
+#   CODEARTIFACT_DOMAIN        CodeArtifact domain name
+#   CODEARTIFACT_DOMAIN_OWNER  AWS account ID that owns the domain
+#   CODEARTIFACT_REPOSITORY    CodeArtifact repository name
+#
+# The role needs codeartifact:GetAuthorizationToken, GetRepositoryEndpoint,
+# PublishPackageVersion, PutPackageMetadata, ReadFromRepository, and
+# sts:GetServiceBearerToken.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for example v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.tag || github.event.release.tag_name }}
+    runs-on: ubuntu-latest
+    environment: codeartifact
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern '*.whl' --pattern '*.tar.gz'
+          ls -l dist
+      - uses: astral-sh/setup-uv@v7
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Resolve CodeArtifact endpoint and token
+        id: codeartifact
+        run: |
+          set -euo pipefail
+          endpoint="$(aws codeartifact get-repository-endpoint \
+            --domain "${{ vars.CODEARTIFACT_DOMAIN }}" \
+            --domain-owner "${{ vars.CODEARTIFACT_DOMAIN_OWNER }}" \
+            --repository "${{ vars.CODEARTIFACT_REPOSITORY }}" \
+            --format pypi --query repositoryEndpoint --output text)"
+          token="$(aws codeartifact get-authorization-token \
+            --domain "${{ vars.CODEARTIFACT_DOMAIN }}" \
+            --domain-owner "${{ vars.CODEARTIFACT_DOMAIN_OWNER }}" \
+            --query authorizationToken --output text)"
+          echo "::add-mask::$token"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - name: Upload with uv publish
+        env:
+          UV_PUBLISH_URL: ${{ steps.codeartifact.outputs.endpoint }}
+          UV_PUBLISH_CHECK_URL: ${{ steps.codeartifact.outputs.endpoint }}simple/
+          UV_PUBLISH_USERNAME: aws
+          UV_PUBLISH_PASSWORD: ${{ steps.codeartifact.outputs.token }}
+        # --check-url skips files already present, so re-running is safe.
+        run: uv publish dist/*

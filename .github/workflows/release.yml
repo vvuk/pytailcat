@@ -1,0 +1,77 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the sdist and all platform wheels, then
+# creates a GitHub release for that tag with every distribution attached and
+# auto-generated notes. The tag must match the version in pyproject.toml.
+# Publishing to CodeArtifact happens in publish.yml when the release is created.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  version:
+    name: Check tag matches project version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - id: version
+        run: |
+          set -euo pipefail
+          version="$(uv version --short)"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            echo "::error::Run the release from a tag (got $GITHUB_REF)"; exit 1
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          if [[ "$tag" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject.toml version $version"; exit 1
+          fi
+          # PEP 440 pre-release or dev segments mark a GitHub pre-release.
+          if [[ "$version" =~ (a|b|rc|dev)[0-9]*$ ]]; then prerelease=true; else prerelease=false; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  wheels:
+    name: Build
+    needs: version
+    uses: ./.github/workflows/wheels.yml
+
+  release:
+    name: Create GitHub release
+    needs: [version, wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+      - run: ls -l dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--verify-tag --generate-notes --title "pytailcat ${GITHUB_REF_NAME}")
+          if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*
