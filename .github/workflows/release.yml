@@ -1,14 +1,15 @@
 name: Release
 
-# Pushing a tag such as v0.1.0 builds the sdist and all platform wheels, then
-# creates a GitHub release for that tag with every distribution attached and
-# auto-generated notes. The tag must match the version in pyproject.toml.
-# Publishing to CodeArtifact happens in publish.yml when the release is created.
+# Pushing a tag such as release-0.1.0 builds the sdist and all platform wheels,
+# then creates a GitHub release for that tag with every distribution attached
+# and auto-generated notes. The version after "release-" must match
+# pyproject.toml. Publishing to CodeArtifact happens in publish.yml when the
+# release is created.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag release-0.1.0 && git push origin release-0.1.0
 on:
   push:
-    tags: ['v*']
+    tags: ['release-*']
   workflow_dispatch:
 
 permissions:
@@ -31,10 +32,10 @@ jobs:
         run: |
           set -euo pipefail
           version="$(uv version --short)"
-          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
-            echo "::error::Run the release from a tag (got $GITHUB_REF)"; exit 1
+          if [[ "$GITHUB_REF" != refs/tags/release-* ]]; then
+            echo "::error::Run the release from a release-* tag (got $GITHUB_REF)"; exit 1
           fi
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${GITHUB_REF_NAME#release-}"
           if [[ "$tag" != "$version" ]]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match pyproject.toml version $version"; exit 1
           fi
@@ -72,6 +73,6 @@ jobs:
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
         run: |
           set -euo pipefail
-          args=(--verify-tag --generate-notes --title "pytailcat ${GITHUB_REF_NAME}")
+          args=(--verify-tag --generate-notes --title "pytailcat ${GITHUB_REF_NAME#release-}")
           if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*

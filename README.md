@@ -296,15 +296,15 @@ it lands upstream.
 
 - **CI** (`ci.yml`): runs the commands above plus the Go race tests on Linux
   x86_64, Linux arm64, and macOS arm64 for every push to `main` and every pull
-  request. It also runs the release wheel build so a broken release is caught
-  early.
+  request. After verification passes it also runs the release wheel build so a
+  broken release is caught early.
 - **Build wheels** (`wheels.yml`): reusable workflow producing the sdist and one
   wheel per platform (`manylinux_2_28_x86_64`, `manylinux_2_28_aarch64`,
   `macosx_12_0_arm64`), each bundling that platform's `libtailcat`. Every wheel is
   then installed and smoke-tested on a plain runner without Go.
-- **Release** (`release.yml`): pushing a tag `vX.Y.Z` that matches the version in
-  `pyproject.toml` builds all distributions and creates a GitHub release with them
-  attached and generated notes. Versions with `a`, `b`, `rc`, or `dev` segments are
+- **Release** (`release.yml`): pushing a tag `release-X.Y.Z` that matches the
+  version in `pyproject.toml` builds all distributions and creates a GitHub release
+  with them attached and generated notes. Versions with `a`, `b`, `rc`, or `dev` segments are
   marked pre-releases.
 - **Publish** (`publish.yml`): when a release is published (or manually for a
   tag), downloads its assets and uploads them to AWS CodeArtifact with
@@ -317,7 +317,7 @@ To cut a release:
 ```sh
 uv version X.Y.Z          # updates pyproject.toml and uv.lock
 git commit -am "Release X.Y.Z"
-git tag vX.Y.Z && git push origin main vX.Y.Z
+git tag release-X.Y.Z && git push origin main release-X.Y.Z
 ```
 
 The manual verification workflow (`verify.yml`) tests Python 3.12–3.14 on Linux,

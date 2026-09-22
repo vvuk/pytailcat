@@ -80,4 +80,5 @@ jobs:
   # target, auditwheel, install checks) so a broken release is caught early.
   wheels:
     name: Release wheels
+    needs: verify
     uses: ./.github/workflows/wheels.yml
