@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ssl
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -43,31 +44,89 @@ class _Stream(httpcore.NetworkStream):
         self.ssl_object: ssl.SSLObject | None = None
         self._incoming = ssl.MemoryBIO()
         self._outgoing = ssl.MemoryBIO()
+        self._state_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._receive_lock = threading.Lock()
+        self._receive_generation = 0
+        self._read_backlog = b""
+
+    @contextmanager
+    def _locked(self, op: Operation, lock: Any) -> Iterator[None]:
+        # A different request may own this direction. Cancelling this request
+        # must not wait indefinitely for that request's native I/O to finish.
+        while True:
+            op._check()
+            if self.connection.closed:
+                raise ClosedError("Tailcat connection is closed")
+            if lock.acquire(timeout=0.01):
+                break
+        try:
+            op._check()
+            yield
+        finally:
+            lock.release()
 
     def _tls_call(self, op: Operation, fn: Any, *args: Any) -> Any:
-        # HTTP/1 serializes operations per connection. Each loop uses the same
-        # native operation, so a TLS handshake or write has one overall deadline.
+        # SSLObject and both BIOs share a lock, but no blocking I/O holds it.
+        # HTTP/2 needs a writer to progress while another request is reading.
         while True:
-            try:
-                result = fn(*args)
-            except ssl.SSLWantReadError:
-                self._flush(op)
-                data = self.connection._recv(op, 65536)
-                if data:
-                    self._incoming.write(data)
-                else:
-                    self._incoming.write_eof()
-            except ssl.SSLWantWriteError:
-                self._flush(op)
-            else:
-                self._flush(op)
+            op._check()
+            result = None
+            want_read = want_write = False
+            with self._state_lock:
+                generation = self._receive_generation
+                try:
+                    result = fn(*args)
+                except ssl.SSLWantReadError:
+                    want_read = True
+                except ssl.SSLWantWriteError:
+                    want_write = True
+            self._flush(op)
+            if want_read:
+                with self._locked(op, self._receive_lock):
+                    with self._state_lock:
+                        # Another TLS operation may already have fed the BIO.
+                        if generation != self._receive_generation:
+                            continue
+                    data = self.connection._recv(op, 65536)
+                    with self._state_lock:
+                        if data:
+                            self._incoming.write(data)
+                        else:
+                            self._incoming.write_eof()
+                        self._receive_generation += 1
+            elif not want_write:
                 return result
 
     def _flush(self, op: Operation) -> None:
-        if self._outgoing.pending:
-            self.connection._sendall(op, self._outgoing.read())
+        with self._state_lock:
+            if not self._outgoing.pending:
+                return
+        try:
+            # Acquire before draining the BIO, preserving TLS record order even
+            # when reads generate control records concurrently with writes.
+            with self._locked(op, self._send_lock):
+                with self._state_lock:
+                    data = self._outgoing.read()
+                if data:
+                    self.connection._sendall(op, data)
+        except BaseException:
+            # A partially sent record cannot be replayed or safely skipped.
+            self.close()
+            raise
+
+    def _unread(self, data: bytes) -> None:
+        with self._state_lock:
+            self._read_backlog = data + self._read_backlog
 
     def _read(self, op: Operation, size: int) -> bytes:
+        with self._state_lock:
+            if self._read_backlog:
+                data, self._read_backlog = (
+                    self._read_backlog[:size],
+                    self._read_backlog[size:],
+                )
+                return data
         if self.ssl_object is None:
             return self.connection._recv(op, size)
         try:
@@ -80,6 +139,15 @@ class _Stream(httpcore.NetworkStream):
             return self._read(op, max_bytes)
 
     def _write(self, op: Operation, buffer: bytes) -> None:
+        try:
+            self._write_all(op, buffer)
+        except BaseException:
+            # HTTPcore has already removed these frames from its send queue.
+            # Even cleartext partial writes must invalidate the connection.
+            self.close()
+            raise
+
+    def _write_all(self, op: Operation, buffer: bytes) -> None:
         if self.ssl_object is None:
             self.connection._sendall(op, buffer)
         else:
@@ -128,8 +196,11 @@ class _Stream(httpcore.NetworkStream):
         if info == "server_addr":
             return self.connection.remote_address
         if info == "is_readable":
-            if self.ssl_object is not None and self.ssl_object.pending():
-                return True
+            with self._state_lock:
+                if self._read_backlog or (
+                    self.ssl_object is not None and self.ssl_object.pending()
+                ):
+                    return True
             try:
                 return self.connection._readable()
             except ClosedError:
@@ -144,12 +215,22 @@ class _AsyncStream(httpcore.AsyncNetworkStream):
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
         with _map_errors("read"):
             return await _run(
-                lambda op: self._sync._read(op, max_bytes), timeout, kind="read"
+                lambda op: self._sync._read(op, max_bytes),
+                timeout,
+                # Cancellation can race with a successful read. HTTP/2 frames
+                # may belong to other requests, so never discard those bytes.
+                dispose=self._sync._unread,
+                kind="read",
             )
 
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:
         with _map_errors("write"):
-            await _run(lambda op: self._sync._write(op, buffer), timeout, kind="write")
+            await _run(
+                lambda op: self._sync._write(op, buffer),
+                timeout,
+                dispose=lambda _: self._sync.close(),
+                kind="write",
+            )
 
     async def aclose(self) -> None:
         await _close(self._sync)

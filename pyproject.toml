@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = ["cffi>=1.17.1", "anyio>=4.4,<5"]
 
 [project.optional-dependencies]
-httpx = ["httpx>=0.28,<0.29", "httpcore>=1.0.9,<1.1"]
+httpx = ["httpx>=0.28,<0.29", "httpcore[http2]>=1.0.9,<1.1"]
 
 [dependency-groups]
 dev = ["pytest>=8", "trustme>=1.2", "trio>=0.26", "ruff>=0.11", "pyright>=1.1.400"]

@@ -9,7 +9,7 @@ not required.
 
 The Python package loads the Tailcat Go module through a versioned C API. It
 supports TCP streams, connected UDP flows, client and server identities, private
-DERP configuration, address utilities, and HTTP/1.1 over HTTP or HTTPS.
+DERP configuration, address utilities, and HTTP/1.1 or HTTP/2 over HTTP or HTTPS.
 
 ## Development installation
 
@@ -76,15 +76,18 @@ import anyio
 import httpx
 from pytailcat.httpx import AsyncTailcatTransport
 
+
 async def main():
     origin = "http://service.internal:8080"
     transport = AsyncTailcatTransport(
-        address=os.environ["TAILCAT_ADDRESS"], origin=origin,
+        address=os.environ["TAILCAT_ADDRESS"],
+        origin=origin,
     )
     async with httpx.AsyncClient(transport=transport, base_url=origin) as client:
         async with client.stream("GET", "/events") as response:
             async for chunk in response.aiter_bytes():
                 print(chunk)
+
 
 anyio.run(main)  # or anyio.run(main, backend="trio")
 ```
@@ -104,10 +107,47 @@ To share a peer, pass `client=pytailcat.Client(...)` (or `AsyncClient`) instead 
 `address`. The transport closes its connection pool but leaves a borrowed peer
 open. A transport constructed from an address owns and closes its peer.
 
-HTTP/2, proxy chaining, arbitrary exit-node destinations, OS socket options, and
-an OS `fileno()` are not supported in this first version. The transport's origin
-is required. Configuration on a custom transport, including TLS verification and
-pool limits, takes precedence over the similarly named HTTPX client parameters.
+Proxy chaining, arbitrary exit-node destinations, OS socket options, and an OS
+`fileno()` are not supported. The transport's origin is required. Configuration on
+a custom transport, including TLS verification, pool limits, and HTTP versions,
+takes precedence over the similarly named HTTPX client parameters.
+
+### HTTP/2
+
+The `httpx` extra includes the HTTP/2 dependencies. Enable HTTP/2 on either
+transport (not just on the HTTPX client):
+
+```python
+transport = TailcatTransport(
+    address=os.environ["TAILCAT_ADDRESS"],
+    origin="https://service.internal:8443",
+    http2=True,
+)
+# AsyncTailcatTransport accepts the same options.
+```
+
+HTTPS negotiates `h2` through TLS ALPN and falls back to HTTP/1.1 when necessary.
+Both `http1=True` and `http2=False` are the defaults. Concurrent requests can
+multiplex over a single connection; `limits.max_connections` limits connections,
+not the number of HTTP/2 streams. Inspect `response.http_version` to see which
+protocol was used. TLS certificate and hostname verification still apply.
+
+For a peer known to speak HTTP/2 directly, use `http1=False, http2=True`. This also
+supports a plain `http://` origin, whose traffic remains WireGuard-encrypted by
+Tailcat. With `http1=True`, plain HTTP uses HTTP/1.1; HTTPcore does not implement
+the HTTP/1.1 `Upgrade: h2c` exchange. See [HTTPcore's protocol negotiation
+documentation](https://www.encode.io/httpcore/http2/#http2-negotiation).
+
+Known upstream limitation: with HTTPcore 1.0.9, a synchronous thread reading an
+indefinitely silent HTTP/2 response can hold the shared reader lock and stall
+other streams, notably concurrent flow-controlled uploads. We reproduced this
+with HTTPcore's stock TCP/TLS backend as well as Tailcat. For this workload, use
+the async transport or separate transports/connections, and retain finite timeouts.
+The timing-dependent reproducer is kept outside default test discovery:
+
+```sh
+uv run pytest tests/repro_httpcore_stall.py -v
+```
 
 ## Raw TCP
 
@@ -188,8 +228,14 @@ Async calls run blocking native operations in AnyIO worker threads. Cancelling a
 task cancels the Go operation and waits for that worker to finish before releasing
 buffers. Connection results produced during a cancellation race are closed.
 Cancelled reads and accepts leave their resource usable; cancelled writes may
-already have transmitted bytes. Cancelling an HTTP request discards its affected
-HTTP connection while leaving the peer and pool usable.
+already have transmitted bytes. Cancelling an HTTP/1.1 request discards its
+affected connection while leaving the peer and pool usable. For HTTP/2, cancelling
+a response read preserves the connection and other streams, including when a
+successful native read races with cancellation. A failed or cancelled in-flight
+HTTP write closes the connection conservatively, because partially transmitted
+frames or TLS records cannot safely be skipped. Connection-level I/O errors and
+read/write timeouts can therefore affect all streams sharing that connection;
+per-request cancellation is not the same as a connection read timeout.
 
 Each event loop permits 64 active native operations per category (read, write,
 accept, connect, control). Queue time counts toward deadlines, and queued calls
@@ -214,7 +260,9 @@ uv run python scripts/check_wheel.py --python 3.12 --integration
 ```
 
 Tests start a local DERP/STUN relay and Tailcat HTTP/HTTPS services, with no public
-relay dependency. Go is required for this test fixture. The native ABI's Go tests
+relay dependency. They cover TLS ALPN, HTTP/1.1 fallback, prior-knowledge HTTP/2,
+concurrent flow-controlled uploads, streaming, and cancellation using sync threads,
+asyncio, and Trio. Go is required for the test fixtures. The native ABI's Go tests
 also run with the race detector:
 
 ```sh

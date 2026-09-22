@@ -9,8 +9,7 @@ import pytest
 import trustme
 
 
-@pytest.fixture(scope="session")
-def relay(tmp_path_factory):
+def _service(tmp_path_factory, *, region=None):
     directory = tmp_path_factory.mktemp("tailcat-relay")
     ca = trustme.CA()
     cert = ca.issue_cert("service.internal")
@@ -29,7 +28,9 @@ def relay(tmp_path_factory):
             (source / "build-tags.txt").read_text().strip(),
             "-o",
             str(executable),
-            "./internal/capitest",
+            "./internal/capitest"
+            if region is None
+            else str(root / "tests" / "http2server" / "main.go"),
         ],
         cwd=source,
         check=True,
@@ -49,6 +50,9 @@ def relay(tmp_path_factory):
             text=True,
         )
         try:
+            if region is not None:
+                process.stdin.write(json.dumps(region) + "\n")
+                process.stdin.flush()
             line = process.stdout.readline()
             if not line:
                 log.seek(0)
@@ -63,6 +67,16 @@ def relay(tmp_path_factory):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+
+
+@pytest.fixture(scope="session")
+def relay(tmp_path_factory):
+    yield from _service(tmp_path_factory)
+
+
+@pytest.fixture(scope="session")
+def http2_peer(tmp_path_factory, relay):
+    yield from _service(tmp_path_factory, region=relay["region"])
 
 
 @pytest.fixture(params=["asyncio", "trio"])

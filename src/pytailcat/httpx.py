@@ -1,4 +1,4 @@
-"""HTTP/1.1 and HTTPS transports for HTTPX (install pytailcat[httpx])."""
+"""HTTP/1.1 and HTTP/2 transports for HTTPX (install pytailcat[httpx])."""
 
 from __future__ import annotations
 
@@ -45,8 +45,19 @@ def _origin(url: httpx.URL) -> tuple[str, str, int]:
 
 
 def _settings(
-    origin: str, verify: bool | ssl.SSLContext, limits: httpx.Limits | None
+    origin: str,
+    verify: bool | ssl.SSLContext,
+    limits: httpx.Limits | None,
+    http1: bool,
+    http2: bool,
 ) -> tuple[tuple[str, str, int], dict[str, Any]]:
+    if not http1 and not http2:
+        raise ValueError("At least one of http1 or http2 must be enabled")
+    if http2:
+        try:
+            import h2  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("HTTP/2 requires h2; install pytailcat[httpx]") from exc
     url = httpx.URL(origin)
     key = _origin(url)
     if url.raw_path != b"/" or url.fragment or url.userinfo:
@@ -69,8 +80,8 @@ def _settings(
         "max_connections": limits.max_connections,
         "max_keepalive_connections": limits.max_keepalive_connections,
         "keepalive_expiry": limits.keepalive_expiry,
-        "http1": True,
-        "http2": False,
+        "http1": http1,
+        "http2": http2,
     }
 
 
@@ -131,7 +142,9 @@ class TailcatTransport(httpx.BaseTransport):
     """Route one HTTP origin to a Tailcat peer, preserving Host and TLS SNI.
 
     Supply either address (the transport owns a Client) or client (borrowed).
-    Configure TLS and pool limits here, rather than on httpx.Client.
+    Configure TLS, pool limits, and http2=True here, rather than on httpx.Client.
+    HTTP/2 negotiates over HTTPS, falling back to HTTP/1.1. Set http1=False
+    together with http2=True for prior-knowledge HTTP/2 (including cleartext).
     """
 
     def __init__(
@@ -143,8 +156,10 @@ class TailcatTransport(httpx.BaseTransport):
         verify: bool | ssl.SSLContext = True,
         limits: httpx.Limits | None = None,
         retries: int = 0,
+        http1: bool = True,
+        http2: bool = False,
     ) -> None:
-        self._origin, settings = _settings(origin, verify, limits)
+        self._origin, settings = _settings(origin, verify, limits, http1, http2)
         if (address is None) == (client is None):
             raise ValueError("Supply exactly one of address or client")
         if retries < 0:
@@ -200,8 +215,10 @@ class AsyncTailcatTransport(httpx.AsyncBaseTransport):
         verify: bool | ssl.SSLContext = True,
         limits: httpx.Limits | None = None,
         retries: int = 0,
+        http1: bool = True,
+        http2: bool = False,
     ) -> None:
-        self._origin, settings = _settings(origin, verify, limits)
+        self._origin, settings = _settings(origin, verify, limits, http1, http2)
         if (address is None) == (client is None):
             raise ValueError("Supply exactly one of address or client")
         if retries < 0:

@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -123,11 +124,21 @@ class Operation:
             raise ValueError("timeout must be a finite non-negative number or None")
         else:
             ns = int(timeout * 1e9)
+        self._deadline = None if timeout is None else time.monotonic() + timeout
+        self._cancelled = threading.Event()
         self.native = native()
         self.handle = self.native.handle("tc_operation_new", ns)
 
     def cancel(self) -> None:
+        self._cancelled.set()
         self.native.invoke("tc_operation_cancel", self.handle)
+
+    def _check(self) -> None:
+        """Extend native cancellation/deadlines to Python-side TLS lock waits."""
+        if self._cancelled.is_set():
+            raise CancelledError("Tailcat operation cancelled")
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise TailcatTimeout("Tailcat operation timed out")
 
     def close(self) -> None:
         self.native.close(self.handle)
