@@ -307,13 +307,14 @@ it lands upstream.
   with them attached and generated notes. Versions with `a`, `b`, `rc`, or `dev` segments are
   marked pre-releases.
 - **Publish** (`publish.yml`): when a release is published (or manually for a
-  tag), downloads its assets and uploads them with `uv publish` to the private
-  CodeArtifact index shared with Inferno (domain `nura`, repository `python`).
-  Authentication is keyless GitHub OIDC: the job runs in the `production` GitHub
-  Environment, which only `release-*` tags may deploy to, and assumes the
-  `pytailcat-ci-publish` IAM role defined in Inferno's
-  `infra/terraform/global/codeartifact.tf`. That role can publish only the
-  `pytailcat` package.
+  tag), downloads its assets and uploads them to AWS CodeArtifact with
+  `uv publish`. Authentication is keyless GitHub OIDC: the job runs in the
+  `production` GitHub Environment, which only `release-*` tags may deploy to, and
+  assumes the role in the `AWS_ROLE_ARN` repository variable. It also needs the
+  `AWS_REGION`, `CODEARTIFACT_DOMAIN`, `CODEARTIFACT_DOMAIN_OWNER`, and
+  `CODEARTIFACT_REPOSITORY` variables. For the private index shared with Inferno,
+  the role is `pytailcat-ci-publish`, defined in Inferno's
+  `infra/terraform/global/codeartifact.tf`; it can publish only `pytailcat`.
 
 To cut a release:
 

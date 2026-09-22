@@ -1,16 +1,27 @@
 name: Publish to CodeArtifact
 
-# Uploads the distributions attached to a GitHub release to the private AWS
-# CodeArtifact PyPI index shared with Inferno (domain `nura`, repo `python`,
-# ai account). Runs automatically when release.yml publishes a release, or
-# manually for an existing release-* tag.
+# Uploads the distributions attached to a GitHub release to an AWS
+# CodeArtifact PyPI repository. Runs automatically when release.yml publishes a
+# release, or manually for an existing release-* tag.
 #
 # Auth is keyless GitHub OIDC, matching inferno's publish-client.yml: the job
 # runs in the `production` GitHub Environment (Settings > Environments; only
-# `release-*` tags may deploy to it), and the `pytailcat-ci-publish` IAM role's
-# trust policy accepts only `repo:vvuk/pytailcat:environment:production`. The
-# role is defined in inferno's infra/terraform/global/codeartifact.tf and can
-# publish only the pytailcat package. No AWS secrets live in GitHub.
+# `release-*` tags may deploy to it), and the IAM role's trust policy accepts
+# only `repo:<this repo>:environment:production`. No AWS secrets live in GitHub.
+#
+# Configure these repository variables (Settings > Secrets and variables >
+# Actions). For the shared Inferno index the role is `pytailcat-ci-publish`,
+# defined in inferno's infra/terraform/global/codeartifact.tf.
+#
+#   AWS_REGION                 e.g. us-east-1
+#   AWS_ROLE_ARN               IAM role trusting this repository's OIDC subject
+#   CODEARTIFACT_DOMAIN        CodeArtifact domain name
+#   CODEARTIFACT_DOMAIN_OWNER  AWS account ID that owns the domain
+#   CODEARTIFACT_REPOSITORY    CodeArtifact repository name
+#
+# The role needs codeartifact:GetAuthorizationToken, GetRepositoryEndpoint,
+# ReadFromRepository, PublishPackageVersion, PutPackageMetadata, and
+# sts:GetServiceBearerToken.
 on:
   release:
     types: [published]
@@ -27,12 +38,6 @@ permissions:
 concurrency:
   group: publish-${{ inputs.tag || github.event.release.tag_name }}
   cancel-in-progress: false
-
-env:
-  AWS_REGION: us-east-1
-  CA_DOMAIN: nura
-  CA_DOMAIN_OWNER: '724475142061'
-  CA_REPO: python
 
 jobs:
   publish:
@@ -57,31 +62,35 @@ jobs:
       - name: Configure AWS credentials via OIDC (publish role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::724475142061:role/pytailcat-ci-publish
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: github-actions-publish-pytailcat-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Get CodeArtifact auth token
+      - name: Resolve CodeArtifact endpoint and token
+        id: codeartifact
         run: |
           set -euo pipefail
+          endpoint="$(aws codeartifact get-repository-endpoint \
+            --domain "${{ vars.CODEARTIFACT_DOMAIN }}" \
+            --domain-owner "${{ vars.CODEARTIFACT_DOMAIN_OWNER }}" \
+            --repository "${{ vars.CODEARTIFACT_REPOSITORY }}" \
+            --format pypi --query repositoryEndpoint --output text)"
           token="$(aws codeartifact get-authorization-token \
-            --domain "$CA_DOMAIN" \
-            --domain-owner "$CA_DOMAIN_OWNER" \
+            --domain "${{ vars.CODEARTIFACT_DOMAIN }}" \
+            --domain-owner "${{ vars.CODEARTIFACT_DOMAIN_OWNER }}" \
             --query authorizationToken --output text)"
           echo "::add-mask::$token"
-          echo "CODEARTIFACT_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
 
       - name: Publish to CodeArtifact
+        env:
+          UV_PUBLISH_URL: ${{ steps.codeartifact.outputs.endpoint }}
+          UV_PUBLISH_CHECK_URL: ${{ steps.codeartifact.outputs.endpoint }}simple/
+          UV_PUBLISH_USERNAME: aws
+          UV_PUBLISH_PASSWORD: ${{ steps.codeartifact.outputs.token }}
         # --check-url skips files already present, so re-running is safe.
-        run: |
-          set -euo pipefail
-          publish_url="https://${CA_DOMAIN}-${CA_DOMAIN_OWNER}.d.codeartifact.${AWS_REGION}.amazonaws.com/pypi/${CA_REPO}/"
-          uv publish \
-            --publish-url "$publish_url" \
-            --check-url "${publish_url}simple/" \
-            --username aws \
-            --password "$CODEARTIFACT_AUTH_TOKEN" \
-            dist/*
+        run: uv publish dist/*
 
       - name: Summary
         if: always()
@@ -89,5 +98,5 @@ jobs:
           {
             echo "## Publish pytailcat ${TAG#release-} ${{ job.status }}"
             echo ""
-            echo "- **Index**: \`${CA_DOMAIN}/${CA_REPO}\` (CodeArtifact, ai account)"
+            echo "- **Index**: \`${{ vars.CODEARTIFACT_DOMAIN }}/${{ vars.CODEARTIFACT_REPOSITORY }}\` (CodeArtifact)"
           } >> "$GITHUB_STEP_SUMMARY"
