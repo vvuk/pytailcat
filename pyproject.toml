@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Vladimir Vukicevic", email = "vladimir@pobox.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12.7"
 dependencies = ["cffi>=1.17.1", "anyio>=4.4,<5"]
 
 [project.optional-dependencies]
