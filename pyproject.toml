@@ -1,0 +1,44 @@
+[project]
+name = "pytailcat"
+version = "0.1.0"
+description = "Point-to-point WireGuard streams and HTTPX transports powered by Tailcat"
+readme = "README.md"
+authors = [
+    { name = "Vladimir Vukicevic", email = "vladimir@pobox.com" }
+]
+requires-python = ">=3.12"
+dependencies = ["cffi>=1.17.1", "anyio>=4.4,<5"]
+
+[project.optional-dependencies]
+httpx = ["httpx>=0.28,<0.29", "httpcore>=1.0.9,<1.1"]
+
+[dependency-groups]
+dev = ["pytest>=8", "trustme>=1.2", "trio>=0.26", "ruff>=0.11", "pyright>=1.1.400"]
+
+[build-system]
+requires = ["hatchling>=1.27", "packaging>=24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytailcat"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/scripts", "/native", "/hatch_build.py", "/README.md", "/pyproject.toml", "/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["src"]

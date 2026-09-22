@@ -1,0 +1,58 @@
+name: Verify native bindings and wheels
+
+# The Go C API must first be available at a ref accessible to this workflow.
+# Explicit inputs let the paired repositories be tested before an upstream release.
+on:
+  workflow_dispatch:
+    inputs:
+      tailcat_repository:
+        description: Repository containing cmd/libtailcat
+        required: true
+        default: tailscale/tailcat
+      tailcat_ref:
+        description: Tailcat commit SHA containing the C API changes
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: pytailcat
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pytailcat
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tailcat_repository }}
+          ref: ${{ inputs.tailcat_ref }}
+          path: tailcat
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tailcat/go.mod
+          cache-dependency-path: tailcat/go.sum
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --extra httpx --python ${{ matrix.python }}
+      - run: uv run ruff check src tests scripts hatch_build.py
+      - run: uv run ruff format --check src tests scripts hatch_build.py
+      - run: uv run pyright
+      - run: uv run pytest
+      - run: go test -race ./internal/capi
+        working-directory: tailcat
+      - run: uv build
+      - run: uv run python scripts/check_wheel.py --python ${{ matrix.python }} --integration
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pytailcat-${{ runner.os }}-py${{ matrix.python }}
+          path: pytailcat/dist/*
