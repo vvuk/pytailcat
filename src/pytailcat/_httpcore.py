@@ -15,7 +15,7 @@ import httpcore
 from ._async import AsyncClient, _close, _run
 from ._core import Client, Connection
 from ._errors import ClosedError, TailcatError, TailcatTimeout
-from ._ffi import Operation
+from ._ffi import Token
 
 
 @contextmanager
@@ -51,26 +51,26 @@ class _Stream(httpcore.NetworkStream):
         self._read_backlog = b""
 
     @contextmanager
-    def _locked(self, op: Operation, lock: Any) -> Iterator[None]:
+    def _locked(self, token: Token, lock: Any) -> Iterator[None]:
         # A different request may own this direction. Cancelling this request
         # must not wait indefinitely for that request's native I/O to finish.
         while True:
-            op._check()
+            token._check()
             if self.connection.closed:
                 raise ClosedError("Tailcat connection is closed")
             if lock.acquire(timeout=0.01):
                 break
         try:
-            op._check()
+            token._check()
             yield
         finally:
             lock.release()
 
-    def _tls_call(self, op: Operation, fn: Any, *args: Any) -> Any:
+    def _tls_call(self, token: Token, fn: Any, *args: Any) -> Any:
         # SSLObject and both BIOs share a lock, but no blocking I/O holds it.
         # HTTP/2 needs a writer to progress while another request is reading.
         while True:
-            op._check()
+            token._check()
             result = None
             want_read = want_write = False
             with self._state_lock:
@@ -81,14 +81,14 @@ class _Stream(httpcore.NetworkStream):
                     want_read = True
                 except ssl.SSLWantWriteError:
                     want_write = True
-            self._flush(op)
+            self._flush(token)
             if want_read:
-                with self._locked(op, self._receive_lock):
+                with self._locked(token, self._receive_lock):
                     with self._state_lock:
                         # Another TLS operation may already have fed the BIO.
                         if generation != self._receive_generation:
                             continue
-                    data = self.connection._recv(op, 65536)
+                    data = self.connection._recv(token, 65536)
                     with self._state_lock:
                         if data:
                             self._incoming.write(data)
@@ -98,18 +98,18 @@ class _Stream(httpcore.NetworkStream):
             elif not want_write:
                 return result
 
-    def _flush(self, op: Operation) -> None:
+    def _flush(self, token: Token) -> None:
         with self._state_lock:
             if not self._outgoing.pending:
                 return
         try:
             # Acquire before draining the BIO, preserving TLS record order even
             # when reads generate control records concurrently with writes.
-            with self._locked(op, self._send_lock):
+            with self._locked(token, self._send_lock):
                 with self._state_lock:
                     data = self._outgoing.read()
                 if data:
-                    self.connection._sendall(op, data)
+                    self.connection._sendall(token, data)
         except BaseException:
             # A partially sent record cannot be replayed or safely skipped.
             self.close()
@@ -119,7 +119,7 @@ class _Stream(httpcore.NetworkStream):
         with self._state_lock:
             self._read_backlog = data + self._read_backlog
 
-    def _read(self, op: Operation, size: int) -> bytes:
+    def _read(self, token: Token, size: int) -> bytes:
         with self._state_lock:
             if self._read_backlog:
                 data, self._read_backlog = (
@@ -128,48 +128,48 @@ class _Stream(httpcore.NetworkStream):
                 )
                 return data
         if self.ssl_object is None:
-            return self.connection._recv(op, size)
+            return self.connection._recv(token, size)
         try:
-            return self._tls_call(op, self.ssl_object.read, size)
+            return self._tls_call(token, self.ssl_object.read, size)
         except ssl.SSLZeroReturnError:
             return b""
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        with _map_errors("read"), Operation(timeout) as op:
-            return self._read(op, max_bytes)
+        with _map_errors("read"), Token(timeout) as token:
+            return self._read(token, max_bytes)
 
-    def _write(self, op: Operation, buffer: bytes) -> None:
+    def _write(self, token: Token, buffer: bytes) -> None:
         try:
-            self._write_all(op, buffer)
+            self._write_all(token, buffer)
         except BaseException:
             # HTTPcore has already removed these frames from its send queue.
             # Even cleartext partial writes must invalidate the connection.
             self.close()
             raise
 
-    def _write_all(self, op: Operation, buffer: bytes) -> None:
+    def _write_all(self, token: Token, buffer: bytes) -> None:
         if self.ssl_object is None:
-            self.connection._sendall(op, buffer)
+            self.connection._sendall(token, buffer)
         else:
             offset = 0
             while offset < len(buffer):
                 offset += self._tls_call(
-                    op, self.ssl_object.write, memoryview(buffer)[offset:]
+                    token, self.ssl_object.write, memoryview(buffer)[offset:]
                 )
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        with _map_errors("write"), Operation(timeout) as op:
-            self._write(op, buffer)
+        with _map_errors("write"), Token(timeout) as token:
+            self._write(token, buffer)
 
     def _start_tls(
-        self, op: Operation, context: ssl.SSLContext, hostname: str | None
+        self, token: Token, context: ssl.SSLContext, hostname: str | None
     ) -> _Stream:
         if self.ssl_object is not None:
             raise httpcore.ConnectError("TLS is already active")
         self.ssl_object = context.wrap_bio(
             self._incoming, self._outgoing, server_hostname=hostname
         )
-        self._tls_call(op, self.ssl_object.do_handshake)
+        self._tls_call(token, self.ssl_object.do_handshake)
         return self
 
     def start_tls(
@@ -179,8 +179,8 @@ class _Stream(httpcore.NetworkStream):
         timeout: float | None = None,
     ) -> _Stream:
         try:
-            with _map_errors("connect"), Operation(timeout) as op:
-                return self._start_tls(op, ssl_context, server_hostname)
+            with _map_errors("connect"), Token(timeout) as token:
+                return self._start_tls(token, ssl_context, server_hostname)
         except BaseException:
             self.close()
             raise
@@ -215,7 +215,7 @@ class _AsyncStream(httpcore.AsyncNetworkStream):
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
         with _map_errors("read"):
             return await _run(
-                lambda op: self._sync._read(op, max_bytes),
+                lambda token: self._sync._read(token, max_bytes),
                 timeout,
                 # Cancellation can race with a successful read. HTTP/2 frames
                 # may belong to other requests, so never discard those bytes.
@@ -226,7 +226,7 @@ class _AsyncStream(httpcore.AsyncNetworkStream):
     async def write(self, buffer: bytes, timeout: float | None = None) -> None:
         with _map_errors("write"):
             await _run(
-                lambda op: self._sync._write(op, buffer),
+                lambda token: self._sync._write(token, buffer),
                 timeout,
                 dispose=lambda _: self._sync.close(),
                 kind="write",
@@ -244,7 +244,9 @@ class _AsyncStream(httpcore.AsyncNetworkStream):
         try:
             with _map_errors("connect"):
                 await _run(
-                    lambda op: self._sync._start_tls(op, ssl_context, server_hostname),
+                    lambda token: self._sync._start_tls(
+                        token, ssl_context, server_hostname
+                    ),
                     timeout,
                     kind="connect",
                 )
@@ -315,7 +317,7 @@ class _AsyncBackend(httpcore.AsyncNetworkBackend):
         self._check_backend._check(host, port, local_address, socket_options)
         with _map_errors("connect"):
             connection = await _run(
-                lambda op: self.client._sync._dial(op, port, 1),
+                lambda token: self.client._sync._dial(token, port, 1),
                 timeout,
                 dispose=lambda c: c.close(),
                 kind="connect",

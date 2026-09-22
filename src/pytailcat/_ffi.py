@@ -116,7 +116,9 @@ def config_bytes(config: dict[str, Any]) -> bytes:
     return json.dumps(config, allow_nan=False).encode()
 
 
-class Operation:
+class Token:
+    """An owned native cancellation/deadline token, including with no timeout."""
+
     def __init__(self, timeout: float | None = None) -> None:
         if timeout is None:
             ns = -1
@@ -127,11 +129,11 @@ class Operation:
         self._deadline = None if timeout is None else time.monotonic() + timeout
         self._cancelled = threading.Event()
         self.native = native()
-        self.handle = self.native.handle("tc_operation_new", ns)
+        self.handle = self.native.handle("tc_token_new", ns)
 
     def cancel(self) -> None:
         self._cancelled.set()
-        self.native.invoke("tc_operation_cancel", self.handle)
+        self.native.invoke("tc_token_cancel", self.handle)
 
     def _check(self) -> None:
         """Extend native cancellation/deadlines to Python-side TLS lock waits."""
@@ -143,7 +145,7 @@ class Operation:
     def close(self) -> None:
         self.native.close(self.handle)
 
-    def __enter__(self) -> Operation:
+    def __enter__(self) -> Token:
         return self
 
     def __exit__(self, *exc: Any) -> None:

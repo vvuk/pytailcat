@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Self, overload
 
 from ._errors import TailcatError
-from ._ffi import Operation, config_bytes, encode, native
+from ._ffi import Token, config_bytes, encode, native
 
 MAX_UDP_PAYLOAD = 1232
 
@@ -45,9 +45,9 @@ def parse_address(address: str) -> dict[str, Any]:
 def resolve_address(
     address: str, *, derp_map_url: str = "", timeout: float | None = None
 ) -> str:
-    with Operation(timeout) as op:
+    with Token(timeout) as token:
         return native().text(
-            "tc_address_resolve", op.handle, encode(address), encode(derp_map_url)
+            "tc_address_resolve", token.handle, encode(address), encode(derp_map_url)
         )
 
 
@@ -79,8 +79,8 @@ class _Resource:
                     self._closed = True
                     self._finalizer.detach()
 
-    def _info(self, op: Operation) -> dict[str, Any]:
-        return self._native.json("tc_info", self._handle, op.handle)
+    def _info(self, token: Token) -> dict[str, Any]:
+        return self._native.json("tc_info", self._handle, token.handle)
 
     def __enter__(self) -> Self:
         return self
@@ -94,11 +94,11 @@ class _DataConnection(_Resource):
     remote_address: tuple[str, int]
 
     @classmethod
-    def _from_handle(cls, handle: int, parent: _Resource, op: Operation) -> Self:
+    def _from_handle(cls, handle: int, parent: _Resource, token: Token) -> Self:
         self = cls.__new__(cls)
         self._init_handle(handle, parent)
         try:
-            info = self._info(op)
+            info = self._info(token)
             self.local_address = _endpoint(info["local_address"])
             self.remote_address = _endpoint(info["remote_address"])
         except BaseException:
@@ -106,7 +106,7 @@ class _DataConnection(_Resource):
             raise
         return self
 
-    def _recv(self, op: Operation, size: int) -> bytes:
+    def _recv(self, token: Token, size: int) -> bytes:
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             raise ValueError("size must be a positive integer")
         ffi = self._native.ffi
@@ -116,7 +116,7 @@ class _DataConnection(_Resource):
             self._native.invoke(
                 "tc_conn_read",
                 self._handle,
-                op.handle,
+                token.handle,
                 buffer,
                 size,
                 count,
@@ -127,13 +127,13 @@ class _DataConnection(_Resource):
             raise
         return bytes(ffi.buffer(buffer, count[0]))
 
-    def _send(self, op: Operation, data: bytes | memoryview) -> int:
+    def _send(self, token: Token, data: bytes | memoryview) -> int:
         ffi = self._native.ffi
         buffer = ffi.from_buffer(data)
         count = ffi.new("size_t *")
         try:
             self._native.invoke(
-                "tc_conn_write", self._handle, op.handle, buffer, len(data), count
+                "tc_conn_write", self._handle, token.handle, buffer, len(data), count
             )
         except TailcatError as exc:
             exc.bytes_written = int(count[0])
@@ -146,23 +146,23 @@ class Connection(_DataConnection):
 
     def recv(self, size: int = 65536, *, timeout: float | None = None) -> bytes:
         """Read up to size bytes; b'' means TCP EOF."""
-        with Operation(timeout) as op:
-            return self._recv(op, size)
+        with Token(timeout) as token:
+            return self._recv(token, size)
 
     def send(self, data: bytes, *, timeout: float | None = None) -> int:
         """Write bytes, returning the count; a short write is possible."""
-        with Operation(timeout) as op:
-            return self._send(op, bytes(data))
+        with Token(timeout) as token:
+            return self._send(token, bytes(data))
 
-    def _sendall(self, op: Operation, data: bytes) -> None:
+    def _sendall(self, token: Token, data: bytes) -> None:
         if not data:
-            self._send(op, data)
+            self._send(token, data)
             return
         offset = 0
         view = memoryview(data)
         while offset < len(data):
             try:
-                n = self._send(op, view[offset:])
+                n = self._send(token, view[offset:])
             except TailcatError as exc:
                 exc.bytes_written = getattr(exc, "bytes_written", 0) + offset
                 raise
@@ -172,13 +172,13 @@ class Connection(_DataConnection):
 
     def sendall(self, data: bytes, *, timeout: float | None = None) -> None:
         """Write all bytes using one deadline for the entire operation."""
-        with Operation(timeout) as op:
-            self._sendall(op, bytes(data))
+        with Token(timeout) as token:
+            self._sendall(token, bytes(data))
 
     def close_write(self) -> None:
         """Send TCP EOF while retaining the ability to receive."""
-        with Operation() as op:
-            self._native.invoke("tc_conn_close_write", self._handle, op.handle)
+        with Token() as token:
+            self._native.invoke("tc_conn_close_write", self._handle, token.handle)
 
     def _readable(self) -> bool:
         if self.closed:
@@ -195,12 +195,12 @@ class DatagramConnection(_DataConnection):
         self, size: int = MAX_UDP_PAYLOAD, *, timeout: float | None = None
     ) -> bytes:
         """Receive one packet; an empty result is a valid zero-length datagram."""
-        with Operation(timeout) as op:
-            return self._recv(op, size)
+        with Token(timeout) as token:
+            return self._recv(token, size)
 
     def send(self, data: bytes, *, timeout: float | None = None) -> int:
-        with Operation(timeout) as op:
-            return self._send(op, bytes(data))
+        with Token(timeout) as token:
+            return self._send(token, bytes(data))
 
 
 class Listener(_Resource):
@@ -209,13 +209,13 @@ class Listener(_Resource):
 
     @classmethod
     def _from_handle(
-        cls, handle: int, parent: Server, network: int, op: Operation
+        cls, handle: int, parent: Server, network: int, token: Token
     ) -> Listener:
         self = cls.__new__(cls)
         self._init_handle(handle, parent)
         self._network = network
         try:
-            self.local_address = _endpoint(self._info(op)["local_address"])
+            self.local_address = _endpoint(self._info(token)["local_address"])
         except BaseException:
             self.close()
             raise
@@ -225,18 +225,18 @@ class Listener(_Resource):
     def port(self) -> int:
         return self.local_address[1]
 
-    def _accept(self, op: Operation) -> Connection | DatagramConnection:
-        handle = self._native.handle("tc_listener_accept", self._handle, op.handle)
+    def _accept(self, token: Token) -> Connection | DatagramConnection:
+        handle = self._native.handle("tc_listener_accept", self._handle, token.handle)
         cls = Connection if self._network == 1 else DatagramConnection
         # Connections survive listener closure, but keep the server alive.
         assert self._parent is not None
-        return cls._from_handle(handle, self._parent, op)
+        return cls._from_handle(handle, self._parent, token)
 
     def accept(
         self, *, timeout: float | None = None
     ) -> Connection | DatagramConnection:
-        with Operation(timeout) as op:
-            return self._accept(op)
+        with Token(timeout) as token:
+            return self._accept(token)
 
 
 class Client(_Resource):
@@ -251,51 +251,60 @@ class Client(_Resource):
             "derp_map_url": derp_map_url,
         }
         self._init_handle(native().handle("tc_client_new", config_bytes(config)))
-        with Operation() as op:
-            self.public_key: str = self._info(op)["public_key"]
+        with Token() as token:
+            self.public_key: str = self._info(token)["public_key"]
 
     @overload
-    def _dial(self, op: Operation, port: int, network: Literal[1]) -> Connection: ...
+    def _dial(self, token: Token, port: int, network: Literal[1]) -> Connection: ...
 
     @overload
     def _dial(
-        self, op: Operation, port: int, network: Literal[2]
+        self, token: Token, port: int, network: Literal[2]
     ) -> DatagramConnection: ...
 
     def _dial(
-        self, op: Operation, port: int, network: int
+        self, token: Token, port: int, network: int
     ) -> Connection | DatagramConnection:
         handle = self._native.handle(
-            "tc_client_dial", self._handle, op.handle, _port(port), network
+            "tc_client_dial", self._handle, token.handle, _port(port), network
         )
         cls = Connection if network == 1 else DatagramConnection
-        return cls._from_handle(handle, self, op)
+        return cls._from_handle(handle, self, token)
 
     def dial_tcp(self, port: int, *, timeout: float | None = None) -> Connection:
-        with Operation(timeout) as op:
-            return self._dial(op, port, 1)
+        with Token(timeout) as token:
+            return self._dial(token, port, 1)
 
     def dial_udp(
         self, port: int, *, timeout: float | None = None
     ) -> DatagramConnection:
-        with Operation(timeout) as op:
-            return self._dial(op, port, 2)
+        with Token(timeout) as token:
+            return self._dial(token, port, 2)
 
-    def _ping(self, op: Operation, disco: bool) -> dict[str, Any]:
-        return self._native.json("tc_client_ping", self._handle, op.handle, int(disco))
+    def _ping(self, token: Token) -> int:
+        ping_ms = self._native.ffi.new("int32_t *")
+        self._native.invoke("tc_client_ping", self._handle, token.handle, ping_ms)
+        return int(ping_ms[0])
 
-    def ping(
-        self, *, disco: bool = False, timeout: float | None = None
-    ) -> dict[str, Any]:
-        with Operation(timeout) as op:
-            return self._ping(op, disco)
+    def ping(self, *, timeout: float | None = None) -> int:
+        """Return relay round-trip latency in whole milliseconds, rounded down."""
+        with Token(timeout) as token:
+            return self._ping(token)
 
-    def _drain(self, op: Operation) -> None:
-        self._native.invoke("tc_drain", self._handle, op.handle)
+    def _disco_ping(self, token: Token) -> dict[str, Any]:
+        return self._native.json("tc_client_disco_ping", self._handle, token.handle)
+
+    def disco_ping(self, *, timeout: float | None = None) -> dict[str, Any]:
+        """Probe discovery and return path details, with latency in seconds."""
+        with Token(timeout) as token:
+            return self._disco_ping(token)
+
+    def _drain(self, token: Token) -> None:
+        self._native.invoke("tc_drain", self._handle, token.handle)
 
     def drain(self, *, timeout: float = 5.0) -> None:
-        with Operation(timeout) as op:
-            self._drain(op)
+        with Token(timeout) as token:
+            self._drain(token)
 
 
 class Server(_Resource):
@@ -337,46 +346,46 @@ class Server(_Resource):
             )
         return self._address
 
-    def _start(self, op: Operation) -> None:
-        self._native.invoke("tc_server_start", self._handle, op.handle)
-        self._address = self._info(op)["address"]
+    def _start(self, token: Token) -> None:
+        self._native.invoke("tc_server_start", self._handle, token.handle)
+        self._address = self._info(token)["address"]
 
     def start(self, *, timeout: float | None = None) -> None:
-        with Operation(timeout) as op:
-            self._start(op)
+        with Token(timeout) as token:
+            self._start(token)
 
-    def _listen(self, op: Operation, port: int, network: int) -> Listener:
+    def _listen(self, token: Token, port: int, network: int) -> Listener:
         handle = self._native.handle(
             "tc_server_listen",
             self._handle,
-            op.handle,
+            token.handle,
             _port(port, listen=True),
             network,
         )
         try:
-            self._address = self._info(op)["address"]
+            self._address = self._info(token)["address"]
         except BaseException:
             self._native.close(handle)
             raise
-        return Listener._from_handle(handle, self, network, op)
+        return Listener._from_handle(handle, self, network, token)
 
     def listen_tcp(self, port: int = 0, *, timeout: float | None = None) -> Listener:
-        with Operation(timeout) as op:
-            return self._listen(op, port, 1)
+        with Token(timeout) as token:
+            return self._listen(token, port, 1)
 
     def listen_udp(self, port: int = 0, *, timeout: float | None = None) -> Listener:
-        with Operation(timeout) as op:
-            return self._listen(op, port, 2)
+        with Token(timeout) as token:
+            return self._listen(token, port, 2)
 
-    def _allow_client(self, op: Operation, public_key: str) -> None:
+    def _allow_client(self, token: Token, public_key: str) -> None:
         self._native.invoke(
-            "tc_server_allow_client", self._handle, op.handle, encode(public_key)
+            "tc_server_allow_client", self._handle, token.handle, encode(public_key)
         )
 
     def allow_client(self, public_key: str) -> None:
         """Add an allowed key; once a list exists, other clients cannot connect."""
-        with Operation() as op:
-            self._allow_client(op, public_key)
+        with Token() as token:
+            self._allow_client(token, public_key)
 
     _drain = Client._drain
     drain = Client.drain

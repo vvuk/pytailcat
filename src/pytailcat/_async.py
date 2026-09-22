@@ -15,7 +15,7 @@ from ._core import (
     Server,
 )
 from ._errors import TailcatTimeout
-from ._ffi import Operation, encode, native
+from ._ffi import Token, encode, native
 
 _limiters: RunVar[dict[str, anyio.CapacityLimiter]] = RunVar("pytailcat_io_limiters")
 
@@ -32,7 +32,7 @@ def _io_limiter(kind: str) -> anyio.CapacityLimiter:
 
 
 async def _run[T](
-    fn: Callable[[Operation], T],
+    fn: Callable[[Token], T],
     timeout: float | None = None,
     *,
     dispose: Callable[[T], None] | None = None,
@@ -42,7 +42,7 @@ async def _run[T](
     result: list[T] = []
     failure: list[BaseException] = []
     done = anyio.Event()
-    with Operation(timeout) as op:
+    with Token(timeout) as token:
         limiter = _io_limiter(kind)
         # Acquire before launching a shielded worker, so a saturated queue still
         # respects timeout/cancellation. Separate directions prevent blocked reads
@@ -59,7 +59,7 @@ async def _run[T](
                 try:
                     result.append(
                         await anyio.to_thread.run_sync(
-                            fn, op, limiter=anyio.CapacityLimiter(1)
+                            fn, token, limiter=anyio.CapacityLimiter(1)
                         )
                     )
                 except BaseException as exc:
@@ -73,7 +73,7 @@ async def _run[T](
                 try:
                     await done.wait()
                 except BaseException:
-                    op.cancel()  # Nonblocking native cancellation bypasses the I/O limiter.
+                    token.cancel()  # Nonblocking native cancellation bypasses the I/O limiter.
                     with anyio.CancelScope(shield=True):
                         await done.wait()
                         if result and dispose is not None:
@@ -122,20 +122,26 @@ class AsyncConnection(_AsyncResource):
         return self._sync.remote_address
 
     async def recv(self, size: int = 65536, *, timeout: float | None = None) -> bytes:
-        return await _run(lambda op: self._sync._recv(op, size), timeout, kind="read")
+        return await _run(
+            lambda token: self._sync._recv(token, size), timeout, kind="read"
+        )
 
     async def send(self, data: bytes, *, timeout: float | None = None) -> int:
         data = bytes(data)
-        return await _run(lambda op: self._sync._send(op, data), timeout, kind="write")
+        return await _run(
+            lambda token: self._sync._send(token, data), timeout, kind="write"
+        )
 
     async def sendall(self, data: bytes, *, timeout: float | None = None) -> None:
         data = bytes(data)
-        await _run(lambda op: self._sync._sendall(op, data), timeout, kind="write")
+        await _run(
+            lambda token: self._sync._sendall(token, data), timeout, kind="write"
+        )
 
     async def close_write(self) -> None:
         await _run(
-            lambda op: native().invoke(
-                "tc_conn_close_write", self._sync._handle, op.handle
+            lambda token: native().invoke(
+                "tc_conn_close_write", self._sync._handle, token.handle
             )
         )
 
@@ -147,11 +153,15 @@ class AsyncDatagramConnection(_AsyncResource):
     async def recv(
         self, size: int = MAX_UDP_PAYLOAD, *, timeout: float | None = None
     ) -> bytes:
-        return await _run(lambda op: self._sync._recv(op, size), timeout, kind="read")
+        return await _run(
+            lambda token: self._sync._recv(token, size), timeout, kind="read"
+        )
 
     async def send(self, data: bytes, *, timeout: float | None = None) -> int:
         data = bytes(data)
-        return await _run(lambda op: self._sync._send(op, data), timeout, kind="write")
+        return await _run(
+            lambda token: self._sync._send(token, data), timeout, kind="write"
+        )
 
 
 def _connection(
@@ -195,7 +205,7 @@ class AsyncClient(_AsyncResource):
         self, port: int, *, timeout: float | None = None
     ) -> AsyncConnection:
         resource = await _run(
-            lambda op: self._sync._dial(op, port, 1),
+            lambda token: self._sync._dial(token, port, 1),
             timeout,
             dispose=lambda r: r.close(),
             kind="connect",
@@ -206,17 +216,20 @@ class AsyncClient(_AsyncResource):
         self, port: int, *, timeout: float | None = None
     ) -> AsyncDatagramConnection:
         resource = await _run(
-            lambda op: self._sync._dial(op, port, 2),
+            lambda token: self._sync._dial(token, port, 2),
             timeout,
             dispose=lambda r: r.close(),
             kind="connect",
         )
         return AsyncDatagramConnection(resource)
 
-    async def ping(
-        self, *, disco: bool = False, timeout: float | None = None
-    ) -> dict[str, Any]:
-        return await _run(lambda op: self._sync._ping(op, disco), timeout)
+    async def ping(self, *, timeout: float | None = None) -> int:
+        """Return relay round-trip latency in whole milliseconds, rounded down."""
+        return await _run(self._sync._ping, timeout)
+
+    async def disco_ping(self, *, timeout: float | None = None) -> dict[str, Any]:
+        """Probe discovery and return path details, with latency in seconds."""
+        return await _run(self._sync._disco_ping, timeout)
 
     async def drain(self, *, timeout: float = 5.0) -> None:
         await _run(self._sync._drain, timeout)
@@ -257,7 +270,7 @@ class AsyncServer(_AsyncResource):
         self, port: int = 0, *, timeout: float | None = None
     ) -> AsyncListener:
         resource = await _run(
-            lambda op: self._sync._listen(op, port, 1),
+            lambda token: self._sync._listen(token, port, 1),
             timeout,
             dispose=lambda r: r.close(),
         )
@@ -267,14 +280,14 @@ class AsyncServer(_AsyncResource):
         self, port: int = 0, *, timeout: float | None = None
     ) -> AsyncListener:
         resource = await _run(
-            lambda op: self._sync._listen(op, port, 2),
+            lambda token: self._sync._listen(token, port, 2),
             timeout,
             dispose=lambda r: r.close(),
         )
         return AsyncListener(resource)
 
     async def allow_client(self, public_key: str) -> None:
-        await _run(lambda op: self._sync._allow_client(op, public_key))
+        await _run(lambda token: self._sync._allow_client(token, public_key))
 
     drain = AsyncClient.drain
 
@@ -283,8 +296,8 @@ async def resolve_address(
     address: str, *, derp_map_url: str = "", timeout: float | None = None
 ) -> str:
     return await _run(
-        lambda op: native().text(
-            "tc_address_resolve", op.handle, encode(address), encode(derp_map_url)
+        lambda token: native().text(
+            "tc_address_resolve", token.handle, encode(address), encode(derp_map_url)
         ),
         timeout,
     )

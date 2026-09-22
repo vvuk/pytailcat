@@ -71,7 +71,7 @@ def test_transport_does_not_close_borrowed_client(relay):
         ) as client:
             assert client.get("/").status_code == 200
         assert not peer.closed
-        assert peer.ping(timeout=5)["latency"] >= 0
+        assert peer.ping(timeout=5) >= 0
 
 
 def test_pool_timeout_and_idle_connection_closure(relay):
@@ -168,4 +168,4 @@ async def test_async_pool_timeout_early_close_and_borrowed_peer(relay):
             with pytest.raises(httpx.ReadTimeout):
                 await client.get("/slow", timeout=httpx.Timeout(10, read=0.02))
         assert not peer.closed
-        assert (await peer.ping(timeout=5))["latency"] >= 0
+        assert await peer.ping(timeout=5) >= 0

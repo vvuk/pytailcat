@@ -6,7 +6,7 @@ import httpcore
 import pytest
 
 from pytailcat import TailcatTimeout
-from pytailcat._ffi import Operation
+from pytailcat._ffi import Token
 from pytailcat._httpcore import _AsyncStream, _Stream
 
 
@@ -24,7 +24,7 @@ async def test_cancellation_racing_successful_network_read_preserves_bytes():
     payload = b"frames for several HTTP/2 streams"
 
     class ControlledConnection(Connection):
-        def _recv(self, op, size):
+        def _recv(self, token, size):
             entered.set()
             assert release.wait(5)
             return payload
@@ -57,7 +57,7 @@ async def test_tls_lock_wait_can_be_cancelled_without_waiting_for_other_io():
 
         with anyio.fail_after(3):
             with anyio.move_on_after(0.05) as scope:
-                await _run(lambda op: stream._sync._flush(op))
+                await _run(lambda token: stream._sync._flush(token))
             assert scope.cancel_called
     assert stream._sync.connection.closed
 
@@ -65,9 +65,9 @@ async def test_tls_lock_wait_can_be_cancelled_without_waiting_for_other_io():
 def test_tls_lock_wait_counts_toward_operation_deadline():
     stream = _Stream(Connection())
     stream._outgoing.write(b"pending TLS record")
-    with stream._send_lock, Operation(0.01) as op:
+    with stream._send_lock, Token(0.01) as token:
         with pytest.raises(TailcatTimeout):
-            stream._flush(op)
+            stream._flush(token)
     assert stream.connection.closed
 
 
@@ -76,7 +76,7 @@ def test_tls_flush_keeps_record_order_without_holding_ssl_state_lock():
     sent = []
 
     class ControlledConnection(Connection):
-        def _sendall(self, op, data):
+        def _sendall(self, token, data):
             if data == b"first":
                 entered.set()
                 assert release.wait(5)
@@ -85,8 +85,8 @@ def test_tls_flush_keeps_record_order_without_holding_ssl_state_lock():
     stream = _Stream(ControlledConnection())
 
     def flush():
-        with Operation(5) as op:
-            stream._flush(op)
+        with Token(5) as token:
+            stream._flush(token)
 
     stream._outgoing.write(b"first")
     with ThreadPoolExecutor(max_workers=2) as workers:
@@ -109,7 +109,7 @@ def test_tls_flush_keeps_record_order_without_holding_ssl_state_lock():
 
 def test_partial_network_write_failure_invalidates_connection():
     class FailingConnection(Connection):
-        def _sendall(self, op, data):
+        def _sendall(self, token, data):
             raise TailcatTimeout("partial write")
 
     stream = _Stream(FailingConnection())

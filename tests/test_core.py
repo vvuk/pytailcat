@@ -4,7 +4,7 @@ import anyio
 import pytest
 
 import pytailcat as tc
-from pytailcat._ffi import Operation, native
+from pytailcat._ffi import Token, native
 
 
 def test_identity_can_be_reused_without_exposing_secrets():
@@ -93,11 +93,11 @@ def test_address_parse_and_resolve_preserve_identity(relay):
 
 def test_c_abi_rejects_wrong_type_and_stale_handles():
     lib = native()
-    with Operation() as op:
+    with Token() as token:
         with pytest.raises(tc.InvalidArgumentError):
-            lib.handle("tc_client_dial", op.handle, op.handle, 80, 1)
+            lib.handle("tc_client_dial", token.handle, token.handle, 80, 1)
     with pytest.raises(tc.ClosedError):
-        lib.invoke("tc_operation_cancel", op.handle)
+        lib.invoke("tc_token_cancel", token.handle)
 
 
 @pytest.mark.anyio

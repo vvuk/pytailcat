@@ -215,8 +215,11 @@ map. Both clients and servers support `derp_map_url`. With no configuration,
 Tailcat uses its default public relay map. `parse_address()` returns public
 metadata, and `resolve_address()` embeds relay metadata for later offline
 resolution. `resolve_address_async()` is the asynchronous counterpart.
-`client.ping()` reports relay latency; `ping(disco=True)` also reports path
-information. Latencies are in seconds.
+`client.ping()` returns relay latency as an integer number of milliseconds
+(fractional milliseconds are truncated). `client.disco_ping()` probes discovery
+and returns a dictionary with `latency` in seconds, `endpoint`, `derp_region_id`,
+and `derp_region_code`. Both methods also exist on `AsyncClient` and accept a
+`timeout` in seconds; use a timeout to bound discovery if no pong arrives.
 
 Tailcat addresses normally contain a pre-shared secret. Keep them out of URL
 hostnames, logs, and public DNS. The Go bridge discards diagnostic logs and parsed
